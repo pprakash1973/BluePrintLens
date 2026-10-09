@@ -360,7 +360,15 @@ export function Viewer({ id }: { id: string }) {
                   ))}
                 </div>
               )}
-              <div ref={flowRef} className="min-h-0 flex-1 bg-white">
+              <div ref={flowRef} className="relative min-h-0 flex-1 bg-white">
+                {focus && (
+                  <div className="no-print absolute right-3 top-3 z-20 flex items-center gap-2 rounded-full border border-brand bg-white px-3 py-1 text-xs shadow-md" role="status">
+                    <span className="font-medium text-brand">
+                      {trace.from && trace.to ? (tracePath ? "Showing traced path" : "No route between those steps") : highlight ? "Showing steps from your answer" : "Showing everything before and after the selected step"}
+                    </span>
+                    <button className="font-semibold text-ink hover:underline" onClick={() => { setTrace({ from: "", to: "" }); setHighlight(null); setSelected(null); }}>Clear</button>
+                  </div>
+                )}
                 <FlowCanvas steps={flow.steps} links={flow.links} by={by} matches={matches} selectedId={selected} activeId={activeStep?.id ?? null}
                   overlays={overlays} badges={badges} diff={diffMap} focus={focus} onSelect={selectFlow} />
               </div>

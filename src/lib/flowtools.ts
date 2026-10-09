@@ -87,7 +87,7 @@ export function groupSteps(m: ProcessModel, scopeId: string, expanded: Set<strin
     const key = `${a}>${b}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    links.push(a === l.from && b === l.to ? l : { ...l, id: `g_${l.id}`, from: a, to: b });
+    links.push(a === l.from && b === l.to ? l : { ...l, id: `g_${l.id}`, from: a, to: b, condition: "", type: l.type === "handoff" ? "handoff" : "sequence" });
   }
   return { steps, links, groups: emitted.size };
 }
