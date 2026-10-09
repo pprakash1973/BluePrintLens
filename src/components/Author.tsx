@@ -37,6 +37,9 @@ export function Author({ id }: { id: string }) {
   const [msg, setMsg] = useState("");
   const [summary, setSummary] = useState("");
   const [diff, setDiff] = useState<string>("");
+  const [publishing, setPublishing] = useState(false);
+  const [confirmLow, setConfirmLow] = useState(false);
+  const [banner, setBanner] = useState<{ ok: boolean; text: string } | null>(null);
 
   const reload = useCallback(async () => {
     const b = await api<Bundle>(`/api/blueprints/${id}`);
@@ -69,14 +72,16 @@ export function Author({ id }: { id: string }) {
     try { await api(`/api/blueprints/${id}/model`, { method: "PUT", json: normalizeModel(model) }); setDirty(false); setMsg("Draft saved"); return true; }
     catch (e) { setMsg(e instanceof Error ? e.message : "Save failed"); return false; }
   }
-  async function publish() {
-    if (!model) return;
-    if (lowCount > 0 && !confirm(`${lowCount} step(s) still have low confidence. Publish anyway?`)) return;
-    if (!(await save())) return;
+  async function publish(force = false) {
+    if (!model || publishing) return;
+    if (lowCount > 0 && !force) { setConfirmLow(true); return; }
+    setConfirmLow(false); setPublishing(true); setBanner(null);
     try {
+      if (!(await save())) throw new Error("Could not save the draft before publishing");
       const r = await api<{ versionNo: number }>(`/api/blueprints/${id}/model`, { method: "POST", json: { changeSummary: summary } });
-      setMsg(`Published v${r.versionNo}`); setSummary(""); reload();
-    } catch (e) { setMsg(e instanceof Error ? e.message : "Publish failed"); }
+      setBanner({ ok: true, text: `Published version ${r.versionNo}.` }); setSummary(""); await reload();
+    } catch (e) { setBanner({ ok: false, text: e instanceof Error ? e.message : "Publish failed" }); }
+    finally { setPublishing(false); }
   }
   async function showDiff() {
     if (!(await save())) return;
@@ -133,11 +138,27 @@ export function Author({ id }: { id: string }) {
           {publishedCount > 0 && <button className="btn" onClick={showDiff}>Compare with published</button>}
           <button className="btn" onClick={save} disabled={!dirty}>Save draft</button>
           <input className="input !w-56" placeholder="Change summary (optional)" value={summary} onChange={(e) => setSummary(e.target.value)} aria-label="Change summary" />
-          <button className="btn btn-primary" onClick={publish} disabled={!model}>Publish</button>
+          <button className="btn btn-primary" onClick={() => publish()} disabled={!model || publishing}>{publishing ? "Publishing…" : "Publish"}</button>
           {publishedCount > 0 && <Link className="btn" href={`/b/${id}`}>Open viewer</Link>}
         </div>
       </div>
 
+      {confirmLow && (
+        <div role="alertdialog" className="flex flex-wrap items-center gap-3 border-b border-warn bg-amber-50 px-4 py-2 text-sm">
+          <AlertTriangle size={16} className="text-warn" aria-hidden />
+          <span>{lowCount} step(s) still have low confidence. Review them first (tick “Needs review” in the list), or publish anyway.</span>
+          <button className="btn" onClick={() => { setConfirmLow(false); setOnlyLow(true); setLeft("steps"); }}>Review them</button>
+          <button className="btn btn-primary" onClick={() => publish(true)}>Publish anyway</button>
+          <button className="btn" onClick={() => setConfirmLow(false)}>Cancel</button>
+        </div>
+      )}
+      {banner && (
+        <div role={banner.ok ? "status" : "alert"} className={`flex items-center gap-3 border-b px-4 py-2 text-sm ${banner.ok ? "border-control bg-green-50 text-control" : "border-pain bg-red-50 text-pain"}`}>
+          <span>{banner.text}</span>
+          {banner.ok && <Link className="btn" href={`/b/${id}`}>Open viewer</Link>}
+          <button className="btn ml-auto" onClick={() => setBanner(null)}>Dismiss</button>
+        </div>
+      )}
       <div className="border-b border-line p-3">
         <UploadPanel blueprintId={id} blob={!!me?.blob} ai={!!me?.ai} hasDraft={!!model} onDone={reload} />
       </div>
