@@ -5,7 +5,9 @@ import {
   type Node, type Edge, type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Flame, ShieldCheck, Cog, AlertTriangle, Check, MessageSquare, Plus, Info } from "lucide-react";
+import { Flame, ShieldCheck, Cog, AlertTriangle, Check, MessageSquare, Plus, Info, Hand, Repeat, Clock, Users } from "lucide-react";
+import { isManual } from "@/lib/flowtools";
+import { fmtHrs, type EvidenceStats } from "@/lib/evidence";
 import type { Link, Step } from "@/lib/model";
 import { LOW_CONFIDENCE } from "@/lib/model";
 import { layoutSteps, LANE_LABEL_W, laneOf, type LaneBy, type NodeKind, type Placed, type Side } from "@/lib/layout";
@@ -14,9 +16,11 @@ export type Overlays = { pain: boolean; controls: boolean; automation: boolean; 
 export type Focus = { nodes: Set<string>; edges: Set<string> };
 export type StepBadge = { approved: number; changes: number; comments: number };
 
+type EvNode = { cases: number; wait: number; rework: number; heat: number; observed: boolean };
 type StepData = {
   step: Step | null; kind: NodeKind; w: number; h: number; dim: boolean; selected: boolean; active: boolean;
   overlays: Overlays; badge?: StepBadge; diff?: "added" | "changed";
+  detailed?: boolean; secondary?: boolean; hiddenAlt?: number; ev?: EvNode;
 };
 
 const SIDE_POS: Record<Side, Position> = { l: Position.Left, r: Position.Right, t: Position.Top, b: Position.Bottom };
@@ -50,6 +54,7 @@ function ring(d: StepData) {
 function Badges({ s, badge }: { s: Step; badge?: StepBadge }) {
   return (
     <div className="flex items-center gap-1.5 text-[10px] text-muted">
+      {isManual(s) && <span title="Manual workaround / off-system work (detected)" className="flex items-center gap-0.5 text-[#b45309]"><Hand size={11} />manual</span>}
       {s.painPoints.length > 0 && <span title="Pain points" className="flex items-center gap-0.5 text-pain"><Flame size={11} />{s.painPoints.length}</span>}
       {s.controls.length > 0 && <span title="Controls" className="flex items-center gap-0.5 text-control"><ShieldCheck size={11} />{s.controls.length}</span>}
       {s.automationTag !== "none" && <span title={`Automation: ${s.automationTag}`} className="flex items-center gap-0.5 text-auto"><Cog size={11} />{s.automationTag}</span>}
@@ -69,6 +74,18 @@ function Tooltip({ s }: { s: Step }) {
       {s.systems.length > 0 && <div><b>Systems:</b> {s.systems.join(", ")}</div>}
       {s.painPoints.length > 0 && <div className="text-pain"><b>Pain:</b> {s.painPoints[0]}</div>}
       <div className="mt-1 text-muted">Click for details</div>
+    </div>
+  );
+}
+
+function EvidenceStrip({ ev }: { ev: EvNode }) {
+  if (!ev.observed) return <div className="mt-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-muted">Not observed in event log</div>;
+  return (
+    <div className="mt-1 flex items-center gap-2 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+      style={{ background: `rgba(217,59,59,${(0.06 + ev.heat * 0.3).toFixed(2)})`, color: ev.heat > 0.6 ? "#9b1c1c" : "#334155" }}>
+      <span className="flex items-center gap-0.5" title="Cases that passed through this step"><Users size={10} />{ev.cases.toLocaleString()}</span>
+      <span className="flex items-center gap-0.5" title="Median wait before this step"><Clock size={10} />{fmtHrs(ev.wait)}</span>
+      {ev.rework > 0 && <span className="flex items-center gap-0.5" title="Cases repeating this step (rework)"><Repeat size={10} />{Math.round(ev.rework * 100)}%</span>}
     </div>
   );
 }
@@ -103,6 +120,8 @@ function FlowNode({ data }: NodeProps<Node<StepData>>) {
         <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-[11px] font-semibold leading-tight text-ink">
           <span className="line-clamp-3">{s.name}</span>
         </div>
+        {!!d.hiddenAlt && <span className="absolute -right-2 -top-2 rounded-full border border-warn bg-white px-1.5 text-[10px] font-semibold text-[#8a5800]" title="Alternative branches hidden — switch to 'With exceptions' to see them">+{d.hiddenAlt}</span>}
+        {d.ev && <div className="absolute left-1/2 top-full w-40 -translate-x-1/2"><EvidenceStrip ev={d.ev} /></div>}
       </div>
     );
   }
@@ -110,19 +129,28 @@ function FlowNode({ data }: NodeProps<Node<StepData>>) {
   const accent = isGroup || d.kind === "subprocess" ? "#7c4dff" : d.kind === "event" ? "#1f8f5f" : "#2f6fed";
   return (
     <div
-      className={`group relative flex flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left shadow-sm transition-shadow hover:shadow-md ${ring(d)} ${fade} ${d.kind === "event" ? "!rounded-full !p-0" : ""}`}
-      style={{ width: d.w, height: d.h, borderColor: "#cfd6e4", borderTop: `3px solid ${accent}`, background: diffBg }}
+      className={`group relative flex flex-col justify-between rounded-xl border px-3 py-2 text-left shadow-sm transition-shadow hover:shadow-md ${ring(d)} ${fade} ${d.kind === "event" ? "!rounded-full !p-0" : ""} ${d.secondary ? "!border-dashed !shadow-none" : ""}`}
+      style={{ width: d.w, height: d.h, borderColor: d.ev && d.ev.heat > 0.6 ? "#d93b3b" : "#cfd6e4", borderTop: `3px solid ${d.secondary ? "#aab3c3" : accent}`, background: d.secondary ? "#fafbfd" : diffBg }}
       role="button" aria-label={`${s.type}: ${s.name}`}
     >
       <Handles />
       {!isGroup && <Tooltip s={s} />}
-      <div className="text-[12px] font-semibold leading-tight text-ink"><span className="line-clamp-2">{s.name}</span></div>
+      <div className={`text-[12px] font-semibold leading-tight ${d.secondary ? "text-muted" : "text-ink"}`}><span className="line-clamp-2">{s.name}</span></div>
+      {d.detailed && !isGroup && (
+        <div className="mt-1 min-h-0 flex-1 space-y-0.5 overflow-hidden text-[10px] leading-snug text-muted">
+          {s.description && <p className="line-clamp-2">{s.description}</p>}
+          {s.rules[0] && <p className="line-clamp-1"><b className="text-ink">Rule:</b> {s.rules[0]}{s.rules.length > 1 ? ` (+${s.rules.length - 1})` : ""}</p>}
+          {(s.inputs.length > 0 || s.outputs.length > 0) && <p className="line-clamp-1"><b className="text-ink">In:</b> {s.inputs.join(", ") || "—"} <b className="text-ink">→ Out:</b> {s.outputs.join(", ") || "—"}</p>}
+          {s.systems.length > 0 && <p className="line-clamp-1"><b className="text-ink">Systems:</b> {s.systems.join(", ")}</p>}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <Badges s={s} badge={d.badge} />
         {(isGroup || d.kind === "subprocess") && (
           <span className="flex h-4 w-4 items-center justify-center rounded border border-auto text-auto" title={isGroup ? "Click to expand" : "Sub-process"}><Plus size={10} /></span>
         )}
       </div>
+      {d.ev && <div className="absolute inset-x-0 top-full"><EvidenceStrip ev={d.ev} /></div>}
     </div>
   );
 }
@@ -173,6 +201,9 @@ function Legend() {
             <li className="flex items-center gap-2"><span className="w-6 border-t-2 border-brand" />Handoff</li>
             <li className="flex items-center gap-2"><span className="w-6 border-t-2 border-dashed border-pain" />Exception / loop</li>
             <li className="flex items-center gap-2"><span className="w-6 border-t-2 border-dotted border-slate-400" />Implied order</li>
+            <li className="flex items-center gap-2"><span className="w-6 border-t-[3px] border-ink" />Main path</li>
+            <li className="flex items-center gap-2"><Hand size={12} className="text-[#b45309]" />Manual workaround</li>
+            <li className="flex items-center gap-2"><span className="w-6 border-t-2 border-dashed border-[#9333ea]" />Deviation (evidence)</li>
           </ul>
         )}
       </div>
@@ -184,6 +215,11 @@ export type FlowProps = {
   steps: Step[]; links: Link[]; by: LaneBy; matches: Set<string> | null; selectedId?: string | null; activeId?: string | null;
   overlays: Overlays; badges?: Record<string, StepBadge>; diff?: Record<string, "added" | "changed">; onSelect: (id: string | null) => void;
   focus?: Focus | null;
+  detailed?: boolean;
+  /** main path emphasis: on-path edges bold, off-path steps styled as secondary */
+  main?: Focus | null;
+  hiddenAlt?: Record<string, number>;
+  evidence?: EvidenceStats | null;
 };
 
 const MIN_READABLE = 0.6;
@@ -191,7 +227,9 @@ const MIN_READABLE = 0.6;
 function Inner(p: FlowProps) {
   const rf = useReactFlow();
   const box = useRef<HTMLDivElement>(null);
-  const layout = useMemo(() => layoutSteps(p.steps, p.links, p.by), [p.steps, p.links, p.by]);
+  const layout = useMemo(() => layoutSteps(p.steps, p.links, p.by, { detailed: p.detailed }), [p.steps, p.links, p.by, p.detailed]);
+  const maxWait = useMemo(() => Math.max(1, ...Object.values(p.evidence?.steps ?? {}).map((x) => x.medianWaitHrs)), [p.evidence]);
+  const maxEdge = useMemo(() => Math.max(1, ...Object.values(p.evidence?.edges ?? {}).map((x) => x.count)), [p.evidence]);
   const byId = useMemo(() => new Map<string, Placed>(layout.nodes.map((n) => [n.id, n])), [layout]);
 
   const nodes: Node[] = useMemo(() => {
@@ -208,11 +246,17 @@ function Inner(p: FlowProps) {
           dim: !!n.step && ((!!p.matches && !p.matches.has(sid)) || (!!p.focus && !p.focus.nodes.has(sid))),
           selected: p.selectedId === sid, active: p.activeId === sid,
           overlays: p.overlays, badge: p.badges?.[sid], diff: p.diff?.[sid],
+          detailed: p.detailed, secondary: !!p.main && !!n.step && !p.main.nodes.has(sid), hiddenAlt: p.hiddenAlt?.[sid],
+          ev: p.evidence && n.step && !sid.startsWith("grp:") ? (() => {
+            const e = p.evidence!.steps[sid];
+            return e ? { cases: e.cases, wait: e.medianWaitHrs, rework: e.cases ? e.reworkCases / e.cases : 0, heat: e.medianWaitHrs / maxWait, observed: true }
+              : { cases: 0, wait: 0, rework: 0, heat: 0, observed: false };
+          })() : undefined,
         } satisfies StepData,
       };
     });
     return [...lanes, ...steps];
-  }, [layout, p.matches, p.focus, p.selectedId, p.activeId, p.overlays, p.badges, p.diff]);
+  }, [layout, p.matches, p.focus, p.selectedId, p.activeId, p.overlays, p.badges, p.diff, p.detailed, p.main, p.hiddenAlt, p.evidence, maxWait]);
 
   const edges: Edge[] = useMemo(() => layout.links.map((l) => {
     const a = byId.get(l.from)!, b = byId.get(l.to)!;
@@ -220,8 +264,14 @@ function Inner(p: FlowProps) {
     const crossing = !synthetic && laneOf(a.step!, p.by) !== laneOf(b.step!, p.by);
     const hand = p.overlays.handoffs && !synthetic && (l.type === "handoff" || crossing);
     const inFocus = !p.focus ? true : synthetic ? false : p.focus.edges.has(l.id);
-    const color = synthetic ? "#9aa4b5" : hand ? "#2f6fed" : l.implied ? "#9aa4b5" : EDGE_COLOR[l.type];
-    const label = hand ? `⇄ ${l.condition || "handoff"}` : l.condition || undefined;
+    const deviation = l.id.startsWith("dev_");
+    const onMain = !!p.main && (p.main.edges.has(l.id) || (synthetic && (p.main.nodes.has(l.from) || p.main.nodes.has(l.to))));
+    const ev = p.evidence?.edges[`${l.from}>${l.to}`];
+    const color = deviation ? "#9333ea" : synthetic ? "#9aa4b5" : hand ? "#2f6fed" : onMain ? "#1b2236" : l.implied ? "#9aa4b5" : EDGE_COLOR[l.type];
+    const label = deviation ? `deviation · ${l.condition}` : ev ? `${ev.count.toLocaleString()}${l.condition ? ` · ${l.condition}` : ""}` : hand ? `⇄ ${l.condition || "handoff"}` : l.condition || undefined;
+    const evWidth = ev ? 1.5 + 6 * (ev.count / maxEdge) : 0;
+    const sw = evWidth || (hand ? 2.8 : onMain ? 2.8 : p.focus && inFocus ? 2.4 : 1.6);
+    const mk = Math.max(7, (16 * 1.6) / sw); // markers scale with stroke width; keep arrowheads a constant size
     return {
       id: l.id, source: l.from, target: l.to, sourceHandle: `s-${l.sourceSide}`, targetHandle: `t-${l.targetSide}`,
       type: "smoothstep", pathOptions: { borderRadius: 10, offset: l.back ? 28 : 18 },
@@ -229,16 +279,17 @@ function Inner(p: FlowProps) {
       labelStyle: { fontSize: 10.5, fill: hand ? "#1d4ed8" : l.type === "conditional" ? "#8a5800" : "#334155", fontWeight: 600 },
       labelBgStyle: { fill: "#ffffff", stroke: "#e2e6ee" },
       style: {
-        stroke: color, strokeWidth: hand ? 2.8 : p.focus && inFocus ? 2.4 : 1.6, opacity: inFocus ? 1 : 0.25,
-        strokeDasharray: l.implied ? "2 4" : l.type === "exception" || l.back ? "6 4" : undefined,
+        stroke: color, strokeWidth: sw,
+        opacity: !inFocus ? 0.25 : p.main && !onMain && !synthetic ? 0.55 : p.evidence && !ev && !synthetic && !deviation ? 0.35 : 1,
+        strokeDasharray: deviation ? "4 3" : l.implied ? "2 4" : l.type === "exception" || l.back ? "6 4" : undefined,
       },
-      markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
+      markerEnd: { type: MarkerType.ArrowClosed, color, width: mk, height: mk },
       animated: !!p.focus && inFocus && !synthetic,
     } as Edge;
-  }), [layout, byId, p.overlays.handoffs, p.focus, p.by]);
+  }), [layout, byId, p.overlays.handoffs, p.focus, p.by, p.main, p.evidence, maxEdge]);
 
   // readable initial viewport: never shrink below MIN_READABLE; wide flows start at the left and scroll
-  const fitKey = `${p.by}|${layout.nodes.length}|${layout.lanes.length}`;
+  const fitKey = `${p.by}|${layout.nodes.length}|${layout.lanes.length}|${p.detailed}`;
   useEffect(() => {
     const el = box.current;
     if (!el) return;

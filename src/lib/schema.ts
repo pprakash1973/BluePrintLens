@@ -78,3 +78,11 @@ export const approvals = pgTable("approvals", {
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const evidence = pgTable("evidence", {
+  id: text("id").primaryKey(),
+  blueprintId: text("blueprint_id").notNull(),
+  stats: jsonb("stats").$type<import("./evidence").EvidenceStats>().notNull(),
+  uploadedBy: text("uploaded_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
-import { documents, jobs, versions, blueprints, comments, approvals } from "@/lib/schema";
+import { documents, jobs, versions, blueprints, comments, approvals, evidence } from "@/lib/schema";
 import { requireRole, isResponse } from "@/lib/auth";
 import { getBlueprint } from "@/lib/bp";
 
@@ -31,6 +31,7 @@ export async function DELETE(_: NextRequest, { params }: Ctx) {
   const db = await getDb();
   await db.delete(comments).where(eq(comments.blueprintId, id));
   await db.delete(approvals).where(eq(approvals.blueprintId, id));
+  await db.delete(evidence).where(eq(evidence.blueprintId, id));
   await db.delete(versions).where(eq(versions.blueprintId, id));
   await db.delete(jobs).where(eq(jobs.blueprintId, id));
   await db.delete(documents).where(eq(documents.blueprintId, id));

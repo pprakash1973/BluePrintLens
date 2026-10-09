@@ -13,6 +13,7 @@ export const SIZE = {
   decision: { w: 156, h: 88 },
   event: { w: 44, h: 44 },
 } as const;
+const DETAILED = { w: 236, h: 150 };
 // legacy exports used by other components
 export const NODE_W = SIZE.task.w;
 export const NODE_H = SIZE.task.h;
@@ -34,23 +35,15 @@ export function laneOf(s: Step, by: LaneBy): string {
 }
 
 const kindOf = (s: Step): NodeKind => (s.type === "decision" ? "decision" : s.type === "event" ? "event" : s.type === "subprocess" ? "subprocess" : "task");
-const sizeOf = (k: NodeKind) => (k === "start" || k === "end" || k === "event" ? SIZE.event : SIZE[k]);
+const sizeOf = (k: NodeKind, detailed = false) =>
+  k === "start" || k === "end" || k === "event" ? SIZE.event : detailed && (k === "task" || k === "subprocess") ? DETAILED : SIZE[k];
 
-/**
- * Layered swimlane layout (Sugiyama-style):
- * 1. chain unconnected steps in document order (implied links) and add start/end events,
- * 2. break cycles, assign layers by longest path,
- * 3. order nodes inside each lane/column by barycenter to reduce crossings,
- * 4. place columns with per-column widths so every lane shares the same time axis,
- * 5. pick connection sides so edges route orthogonally (forward: right→left, loops: under the nodes).
- */
-export function layoutSteps(steps: Step[], allLinks: Link[], by: LaneBy): Layout {
+/** Real links plus "implied" links that chain consecutive steps of a process when the chain is otherwise broken. */
+export function withImplied(steps: Step[], allLinks: Link[]): { links: Link[]; implied: Set<string> } {
   const ids = new Set(steps.map((s) => s.id));
   const real = allLinks.filter((l) => ids.has(l.from) && ids.has(l.to) && l.from !== l.to);
   const hasIn = new Set(real.map((l) => l.to));
   const hasOut = new Set(real.map((l) => l.from));
-
-  // 1a. implied links: consecutive steps of the same process where the chain is otherwise broken
   const implied: Link[] = [];
   const byProc = new Map<string, Step[]>();
   steps.forEach((s) => { if (!byProc.has(s.processId)) byProc.set(s.processId, []); byProc.get(s.processId)!.push(s); });
@@ -63,13 +56,28 @@ export function layoutSteps(steps: Step[], allLinks: Link[], by: LaneBy): Layout
       }
     }
   }
-  const links: LayoutLink[] = [...real, ...implied].map((l) => ({ ...l, implied: l.id.startsWith("imp_"), sourceSide: "r", targetSide: "l" }));
+  return { links: [...real, ...implied], implied: new Set(implied.map((l) => l.id)) };
+}
+
+/**
+ * Layered swimlane layout (Sugiyama-style):
+ * 1. chain unconnected steps in document order (implied links) and add start/end events,
+ * 2. break cycles, assign layers by longest path,
+ * 3. order nodes inside each lane/column by barycenter to reduce crossings,
+ * 4. place columns with per-column widths so every lane shares the same time axis,
+ * 5. pick connection sides so edges route orthogonally (forward: right→left, loops: under the nodes).
+ */
+export function layoutSteps(steps: Step[], allLinks: Link[], by: LaneBy, opts: { detailed?: boolean } = {}): Layout {
+  const base = withImplied(steps, allLinks);
+  const hasIn = new Set(base.links.map((l) => l.to));
+  const hasOut = new Set(base.links.map((l) => l.from));
+  const links: LayoutLink[] = base.links.map((l) => ({ ...l, implied: base.implied.has(l.id), sourceSide: "r", targetSide: "l" }));
 
   // nodes
   const nodes = new Map<string, Placed>();
   for (const s of steps) {
     const kind = kindOf(s);
-    const sz = sizeOf(kind);
+    const sz = sizeOf(kind, opts.detailed);
     nodes.set(s.id, { id: s.id, step: s, kind, x: 0, y: 0, w: sz.w, h: sz.h, lane: laneOf(s, by), layer: 0 });
   }
   // 1b. start / end events
@@ -147,7 +155,7 @@ export function layoutSteps(steps: Step[], allLinks: Link[], by: LaneBy): Layout
   colW.forEach((w, i) => { colX[i] = x; x += w + COL_GAP; });
   const width = x - COL_GAP + LEFT_PAD;
 
-  const ROW_H = SIZE.decision.h;
+  const ROW_H = opts.detailed ? DETAILED.h : SIZE.decision.h;
   const stackOf = new Map<string, number>();
   cells.forEach((list) => stackOf.set(list[0].lane, Math.max(stackOf.get(list[0].lane) ?? 1, list.length)));
   const lanes: LaneBox[] = [];

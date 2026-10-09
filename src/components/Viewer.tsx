@@ -8,17 +8,22 @@ import { Header } from "@/components/Header";
 import { FlowCanvas, type Overlays, type StepBadge } from "@/components/FlowCanvas";
 import { StepDetail } from "@/components/StepDetail";
 import { PersonaModal, TourCard, SummaryPanel, SignoffPanel, type Persona } from "@/components/Guide";
-import { focusOf, shortestPath, groupSteps } from "@/lib/flowtools";
+import { focusOf, shortestPath, groupSteps, mainPath } from "@/lib/flowtools";
+import { Executive } from "@/components/Executive";
+import { EvidencePanel } from "@/components/Evidence";
+import type { EvidenceStats } from "@/lib/evidence";
+import type { Link as ModelLink } from "@/lib/model";
 import { childrenOf, descendantIds, LOW_CONFIDENCE, processPath, type Process, type ProcessModel, type Step } from "@/lib/model";
 import { layoutSteps, laneOf, type LaneBy } from "@/lib/layout";
 
-type Tab = "overview" | "flow" | "raci" | "systems" | "heatmap" | "ask" | "changes";
+type Tab = "overview" | "flow" | "evidence" | "raci" | "systems" | "heatmap" | "ask" | "changes";
+type Level = "main" | "all" | "full";
 type VersionMeta = { id: string; versionNo: number; status: string; changeSummary: string; publishedBy: string | null; createdAt: string };
 type Bundle = { blueprint: { id: string; name: string }; versions: VersionMeta[] };
 type DiffRes = { added: { id: string; name: string }[]; removed: { id: string; name: string }[]; changed: { id: string; name: string; fields: string[] }[] };
 
 const TABS: [Tab, string][] = [
-  ["overview", "Overview"], ["flow", "Process flow"], ["raci", "RACI"], ["systems", "Systems"], ["heatmap", "Heatmap"], ["ask", "Ask"], ["changes", "Changes"],
+  ["overview", "Executive"], ["flow", "Operational"], ["evidence", "Evidence"], ["raci", "RACI"], ["systems", "Systems"], ["heatmap", "Heatmap"], ["ask", "Ask"], ["changes", "Changes"],
 ];
 
 function stats(m: ProcessModel, ids: Set<string>) {
@@ -63,6 +68,11 @@ export function Viewer({ id }: { id: string }) {
   const [aiNarr, setAiNarr] = useState<Record<string, string>>({});
   const [walkRole, setWalkRole] = useState("");
   const [highlight, setHighlight] = useState<Set<string> | null>(null);
+  const [level, setLevel] = useState<Level>("main");
+  const [evidence, setEvidence] = useState<EvidenceStats | null>(null);
+  const loadEvidence = useCallback(() => {
+    api<{ evidence: EvidenceStats | null }>(`/api/blueprints/${id}/evidence`).then((r) => setEvidence(r.evidence)).catch(() => setEvidence(null));
+  }, [id]);
 
   const canCollab = !!me?.user && roleRank[me.user.role] >= roleRank.reviewer;
   const isAuthor = me?.user?.role === "author";
@@ -89,7 +99,8 @@ export function Viewer({ id }: { id: string }) {
       })
       .catch((e) => setError(e.message));
     loadBadges();
-  }, [id, loadBadges]);
+    loadEvidence();
+  }, [id, loadBadges, loadEvidence]);
 
   // keep the URL shareable (FR-27)
   useEffect(() => {
@@ -121,7 +132,7 @@ export function Viewer({ id }: { id: string }) {
 
   // sub-process grouping: auto-collapse big scopes, expand on click
   const hasKids = !!model && !!scopeId && childrenOf(model, scopeId).length > 0;
-  useEffect(() => { setGrouped(hasKids && scopeSteps.length > 24); setExpanded(new Set()); }, [scopeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setGrouped(false); setExpanded(new Set()); }, [scopeId]);
 
   const matches = useMemo(() => {
     if (!model || (!fRole && !fSystem && !q.trim())) return null;
@@ -142,23 +153,46 @@ export function Viewer({ id }: { id: string }) {
     return model.steps.filter((s) => stepText(s).includes(needle)).slice(0, 8);
   }, [model, q]);
 
-  const filtering = !!matches || !!(trace.from && trace.to) || wIdx !== null || !!highlight;
+  const filtering = !!matches || !!(trace.from && trace.to) || wIdx !== null || !!highlight || tab === "evidence";
   const flow = useMemo(() => {
     if (!model || !scopeId) return { steps: scopeSteps, links: model?.links ?? [], groups: 0 };
     if (grouped && hasKids && !filtering) return groupSteps(model, scopeId, expanded);
     return { steps: scopeSteps, links: model.links, groups: 0 };
   }, [model, scopeId, scopeSteps, grouped, hasKids, filtering, expanded]);
 
+  // progressive disclosure: main path first, then exceptions, then full detail
+  const mp = useMemo(() => mainPath(flow.steps, flow.links), [flow]);
+  const effLevel: Level = tab === "evidence" ? "all"
+    : level === "main" && (!!matches || !!(trace.from && trace.to) || !!highlight || (!!selected && !mp.nodes.has(selected))) ? "all" : level;
+  const view = useMemo(() => {
+    let steps = flow.steps, links: ModelLink[] = flow.links;
+    let hiddenAlt: Record<string, number> | undefined;
+    if (effLevel === "main") {
+      steps = flow.steps.filter((x) => mp.nodes.has(x.id));
+      links = flow.links.filter((l) => mp.edges.has(l.id));
+      hiddenAlt = {};
+      for (const l of flow.links) if (mp.nodes.has(l.from) && !mp.edges.has(l.id) && !mp.nodes.has(l.to)) hiddenAlt[l.from] = (hiddenAlt[l.from] ?? 0) + 1;
+    }
+    if (tab === "evidence" && evidence) {
+      const ids = new Set(steps.map((x) => x.id));
+      links = [...links, ...evidence.deviations.filter((d) => ids.has(d.from) && ids.has(d.to)).map((d, i) => ({ id: `dev_${i}`, from: d.from, to: d.to, type: "exception" as const, condition: String(d.count) }))];
+    }
+    return { steps, links, hiddenAlt };
+  }, [flow, mp, effLevel, tab, evidence]);
+
   const order = useMemo(() => layoutSteps(scopeSteps, model?.links ?? [], by).order, [scopeSteps, model, by]);
-  const walkOrder = useMemo(() => (walkRole ? order.filter((s) => s.roles.some((r) => r.role === walkRole)) : order), [order, walkRole]);
+  const walkOrder = useMemo(() => {
+    const base = effLevel === "main" ? order.filter((s) => mp.nodes.has(s.id)) : order;
+    return walkRole ? base.filter((s) => s.roles.some((r) => r.role === walkRole)) : base;
+  }, [order, walkRole, effLevel, mp]);
 
   const tracePath = useMemo(() => (trace.from && trace.to && model ? shortestPath(trace.from, trace.to, model.links) : null), [trace, model]);
   const focus = useMemo(() => {
     if (trace.from && trace.to) return tracePath ?? { nodes: new Set<string>(), edges: new Set<string>() };
     if (highlight) return { nodes: highlight, edges: new Set<string>() };
-    if (focusOn && selected && flow.steps.some((s) => s.id === selected)) return focusOf(selected, flow.links);
+    if (focusOn && selected && view.steps.some((s) => s.id === selected)) return focusOf(selected, view.links);
     return null;
-  }, [trace, tracePath, highlight, focusOn, selected, flow]);
+  }, [trace, tracePath, highlight, focusOn, selected, view]);
 
   // walkthrough player
   useEffect(() => {
@@ -267,8 +301,16 @@ export function Viewer({ id }: { id: string }) {
         </div>
       </div>
 
-      {tab === "flow" && (
+      {(tab === "flow" || tab === "evidence") && (
         <div className="no-print flex flex-wrap items-center gap-2 border-b border-line bg-panel px-4 py-2 text-sm">
+          {tab === "flow" && (
+            <div className="flex overflow-hidden rounded-lg border border-brand" role="group" aria-label="Level of detail">
+              {([["main", "Main path"], ["all", "+ Exceptions"], ["full", "+ Rules & data"]] as [Level, string][]).map(([k, label]) => (
+                <button key={k} aria-pressed={level === k} title={k === "main" ? "Only the typical happy path" : k === "all" ? "Add alternative branches, exception and rework loops" : "Add business rules, inputs/outputs and systems on every step"}
+                  className={`px-3 py-1.5 font-medium ${level === k ? "bg-brand text-white" : "bg-white text-brand"}`} onClick={() => setLevel(k)}>{label}</button>
+              ))}
+            </div>
+          )}
           <select className="input !w-auto" aria-label="Process scope" value={scopeId ?? ""} onChange={(e) => { setScope(e.target.value); setSelected(null); }}>
             {model.processes.map((p) => <option key={p.id} value={p.id}>{"— ".repeat(["L0", "L1", "L2", "L3"].indexOf(p.level))}{p.name}</option>)}
           </select>
@@ -323,9 +365,27 @@ export function Viewer({ id }: { id: string }) {
 
       <div className="flex min-h-0 flex-1">
         <main className="min-w-0 flex-1 overflow-auto">
-          {tab === "overview" && <Overview model={model} root={root} onOpen={goFlow} id={id} version={versionNo} badges={badges} mine={mine} canCollab={canCollab} myRole={myRole} onStep={(st) => { setScope(st.processId); setSelected(st.id); setTab("flow"); }} />}
-          {tab === "flow" && (
+          {tab === "overview" && (
+            <Executive model={model} root={root} evidence={evidence} onOpenStage={(pid) => { setLevel("main"); goFlow(pid); }}>
+              <div className="no-print grid gap-4 lg:grid-cols-2">
+                <SummaryPanel id={id} version={versionNo} />
+                <SignoffPanel model={model} badges={badges} mine={mine} canCollab={canCollab} myRole={myRole} onOpen={(st) => { setScope(st.processId); setSelected(st.id); setTab("flow"); }} />
+              </div>
+            </Executive>
+          )}
+          {(tab === "flow" || tab === "evidence") && (
             <div className="flex h-full flex-col">
+              {tab === "evidence" && (
+                <EvidencePanel id={id} model={model} evidence={evidence} canUpload={isAuthor} onChange={loadEvidence}
+                  onHighlight={(ids) => { setHighlight(ids ? new Set(ids) : null); setSelected(null); }} onSelect={(sid) => { const st = model.steps.find((x) => x.id === sid); if (st) { setScope(root.id); setSelected(sid); } }} />
+              )}
+              {tab === "flow" && effLevel === "main" && level === "main" && (
+                <div className="no-print border-b border-line bg-blue-50 px-4 py-1.5 text-xs text-ink">
+                  Showing the <b>main path</b> only ({view.steps.length} of {scopeSteps.length} steps).{" "}
+                  {Object.keys(view.hiddenAlt ?? {}).length > 0 && <>Decisions marked <b>+N</b> have hidden alternatives. </>}
+                  <button className="font-semibold text-brand hover:underline" onClick={() => setLevel("all")}>Show exceptions</button>
+                </div>
+              )}
               <nav className="no-print flex flex-wrap items-center gap-1 border-b border-line bg-white px-4 py-1.5 text-xs text-muted" aria-label="Breadcrumb">
                 {processPath(model, scopeId!).map((p, i, a) => (
                   <span key={p.id}>{i > 0 && " › "}<button className="hover:underline" onClick={() => { setScope(p.id); setSelected(null); }}>{p.name}</button>{i === a.length - 1 && <span className="ml-2">{scopeSteps.length} steps</span>}</span>
@@ -369,8 +429,10 @@ export function Viewer({ id }: { id: string }) {
                     <button className="font-semibold text-ink hover:underline" onClick={() => { setTrace({ from: "", to: "" }); setHighlight(null); setSelected(null); }}>Clear</button>
                   </div>
                 )}
-                <FlowCanvas steps={flow.steps} links={flow.links} by={by} matches={matches} selectedId={selected} activeId={activeStep?.id ?? null}
-                  overlays={overlays} badges={badges} diff={diffMap} focus={focus} onSelect={selectFlow} />
+                <FlowCanvas steps={view.steps} links={view.links} by={by} matches={matches} selectedId={selected} activeId={activeStep?.id ?? null}
+                  overlays={overlays} badges={badges} diff={diffMap} focus={focus} onSelect={selectFlow}
+                  detailed={effLevel === "full"} main={effLevel !== "main" && tab === "flow" ? mp : null} hiddenAlt={view.hiddenAlt}
+                  evidence={tab === "evidence" ? evidence : null} />
               </div>
             </div>
           )}
@@ -397,64 +459,6 @@ const embedMode = () => typeof window !== "undefined" && new URLSearchParams(win
 
 const stepText = (s: Step) =>
   [s.name, s.description, ...s.roles.map((r) => r.role), ...s.systems, ...s.rules, ...s.inputs, ...s.outputs, ...s.controls, ...s.painPoints].join(" ").toLowerCase();
-
-function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
-  return <div className="card px-4 py-3"><div className={`text-2xl font-semibold ${tone ?? ""}`}>{value}</div><div className="text-xs text-muted">{label}</div></div>;
-}
-
-function Overview({ model, root, onOpen, id, version, badges, mine, canCollab, myRole, onStep }: {
-  model: ProcessModel; root: Process; onOpen: (id: string) => void; id: string; version: number | "draft"; badges: Record<string, StepBadge>;
-  mine: Record<string, string>; canCollab: boolean; myRole: string; onStep: (s: Step) => void;
-}) {
-  const all = stats(model, new Set(model.processes.map((p) => p.id)));
-  const l1 = childrenOf(model, root.id);
-  return (
-    <div className="p-5">
-      <div className="mb-1 flex flex-wrap items-baseline gap-3">
-        <h2 className="text-xl font-semibold">{root.name}</h2>
-        <button className="btn !py-1" onClick={() => onOpen(root.id)}>View end-to-end flow</button>
-      </div>
-      <p className="mb-4 max-w-3xl text-sm text-muted">{root.objective || root.scope || "End-to-end process landscape. Click a process area to drill down."}</p>
-      <SummaryPanel id={id} version={version} />
-      <SignoffPanel model={model} badges={badges} mine={mine} canCollab={canCollab} myRole={myRole} onOpen={onStep} />
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <Stat label="Steps" value={all.steps} /><Stat label="Pain points" value={all.pain} tone="text-pain" /><Stat label="Controls" value={all.controls} tone="text-control" />
-        <Stat label="Automation candidates" value={all.auto} tone="text-auto" /><Stat label="Need review (low confidence)" value={all.low} tone="text-warn" />
-      </div>
-      <div className="flex gap-2 overflow-x-auto pb-2">
-        {l1.map((p) => {
-          const st = stats(model, descendantIds(model, p.id));
-          return (
-            <section key={p.id} className="min-w-64 flex-1">
-              <button onClick={() => onOpen(p.id)} className="w-full rounded-lg bg-brand px-4 py-3 text-left text-white [clip-path:polygon(0_0,92%_0,100%_50%,92%_100%,0_100%)] hover:brightness-110">
-                <div className="font-semibold">{p.name}</div>
-                <div className="text-xs opacity-90">{st.steps} steps · {st.pain} pain points · {st.auto} automation</div>
-              </button>
-              <div className="mt-2 space-y-2">
-                {childrenOf(model, p.id).map((c) => {
-                  const cs = stats(model, descendantIds(model, c.id));
-                  return (
-                    <button key={c.id} onClick={() => onOpen(c.id)} className="card w-full p-3 text-left hover:border-brand">
-                      <div className="text-sm font-medium">{c.name}</div>
-                      <div className="mt-1 flex gap-2 text-xs text-muted">
-                        <span>{cs.steps} steps</span>{cs.pain > 0 && <span className="text-pain">🔥{cs.pain}</span>}{cs.auto > 0 && <span className="text-auto">⚙{cs.auto}</span>}{cs.low > 0 && <span className="text-warn">⚠{cs.low}</span>}
-                      </div>
-                      {c.owner && <div className="text-xs text-muted">Owner: {c.owner}</div>}
-                      {childrenOf(model, c.id).length > 0 && <div className="mt-1 text-xs text-muted">{childrenOf(model, c.id).length} sub-processes</div>}
-                    </button>
-                  );
-                })}
-                {childrenOf(model, p.id).length === 0 && model.steps.filter((s) => s.processId === p.id).length > 0 && (
-                  <p className="px-1 text-xs text-muted">Steps defined directly in this area.</p>
-                )}
-              </div>
-            </section>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
 
 function Raci({ model, scopeId, setScope, onSelect }: { model: ProcessModel; scopeId: string; setScope: (id: string) => void; onSelect: (id: string) => void }) {
   const ids = descendantIds(model, scopeId);

@@ -33,6 +33,10 @@ const DDL = [
     id text PRIMARY KEY, blueprint_id text NOT NULL, step_id text NOT NULL, user_id text NOT NULL,
     user_name text NOT NULL, status text NOT NULL, note text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now())`,
   `CREATE INDEX IF NOT EXISTS approvals_bp ON approvals (blueprint_id, step_id)`,
+  `CREATE TABLE IF NOT EXISTS evidence (
+    id text PRIMARY KEY, blueprint_id text NOT NULL, stats jsonb NOT NULL, uploaded_by text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now())`,
+  `CREATE INDEX IF NOT EXISTS evidence_bp ON evidence (blueprint_id)`,
 ];
 
 const g = globalThis as unknown as { __bl_db?: Promise<DB> };
