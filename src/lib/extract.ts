@@ -1,4 +1,4 @@
-import { generateText, Output } from "ai";
+import { generateText, Output, NoObjectGeneratedError } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { ProcessSchema, StepSchema, LinkSchema, emptyModel, normalizeModel, type ProcessModel } from "./model";
@@ -96,7 +96,7 @@ async function aiChunk(args: {
     system: SYSTEM,
     messages: [{ role: "user", content }],
     output: Output.object({ schema: ChunkOutput }),
-    maxOutputTokens: 16000,
+    maxOutputTokens: 32000,
   });
   return output as ChunkOut;
 }
@@ -163,22 +163,66 @@ function offlineChunk(chunk: Chunk, sections: DocSection[]): ChunkOut {
 
 export type StepResult = { model: ProcessModel; log: string };
 
+/** Split a chunk in two so a failed (oversized) extraction can be retried in smaller pieces. */
+function splitChunk(c: Chunk): [Chunk, Chunk] | null {
+  if (c.kind === "pdf" && c.pages && c.pages[1] > c.pages[0]) {
+    const mid = Math.floor((c.pages[0] + c.pages[1]) / 2);
+    const mk = (a: number, b: number): Chunk => ({ kind: "pdf", pages: [a, b], label: a === b ? `p.${a}` : `p.${a}-${b}` });
+    return [mk(c.pages[0], mid), mk(mid + 1, c.pages[1])];
+  }
+  if (c.kind === "text" && c.text && c.text.length > 3000) {
+    const t = c.text;
+    const around = t.indexOf("\n=== SECTION REF:", Math.floor(t.length / 2));
+    const cut = around > 0 && around < t.length - 500 ? around : Math.floor(t.length / 2);
+    const a = t.slice(0, cut), b = t.slice(cut);
+    const keys = (x: string) => [...x.matchAll(/\[IMAGE:([^\]]+)\]/g)].map((m) => m[1]).slice(0, 4);
+    return [
+      { kind: "text", label: `${c.label} (1/2)`, text: a, imageKeys: keys(a) },
+      { kind: "text", label: `${c.label} (2/2)`, text: b, imageKeys: keys(b) },
+    ];
+  }
+  return null;
+}
+
+/** Run AI extraction for a chunk; if the model's output cannot be parsed (usually truncated), split and retry. */
+async function runAi(partial: ProcessModel, chunk: Chunk, tag: string, storageKey: string, depth = 0): Promise<{ model: ProcessModel; out: ChunkOut }> {
+  const images: { data: Buffer; mediaType: string }[] = [];
+  for (const k of chunk.imageKeys ?? []) {
+    try { images.push({ data: await getFile(k), mediaType: k.endsWith(".png") ? "image/png" : "image/jpeg" }); } catch { /* skip missing image */ }
+  }
+  const pdf = chunk.kind === "pdf" ? await getFile(storageKey) : undefined;
+  try {
+    const out = await aiChunk({ partial, chunk, idx: tag, pdf, images });
+    return { model: mergeChunk(partial, out, tag), out };
+  } catch (e) {
+    const parts = NoObjectGeneratedError.isInstance(e) && depth < 3 ? splitChunk(chunk) : null;
+    if (!parts) {
+      if (NoObjectGeneratedError.isInstance(e)) {
+        throw new Error(`The AI response for ${chunk.label} could not be parsed (finish reason: ${e.finishReason ?? "unknown"}). Try a smaller document section.`);
+      }
+      throw e;
+    }
+    const a = await runAi(partial, parts[0], `${tag}a`, storageKey, depth + 1);
+    const b = await runAi(a.model, parts[1], `${tag}b`, storageKey, depth + 1);
+    return {
+      model: b.model,
+      out: { processes: [...a.out.processes, ...b.out.processes], steps: [...a.out.steps, ...b.out.steps], links: [...a.out.links, ...b.out.links] },
+    };
+  }
+}
+
 export async function processChunk(opts: {
   mode: "ai" | "offline"; partial: ProcessModel; chunk: Chunk; idx: string | number; storageKey: string; sections: DocSection[];
 }): Promise<StepResult> {
   const { mode, partial, chunk, idx, storageKey, sections } = opts;
+  let model: ProcessModel;
   let out: ChunkOut;
   if (mode === "offline") {
     out = offlineChunk(chunk, sections);
+    model = mergeChunk(partial, out, idx);
   } else {
-    const images: { data: Buffer; mediaType: string }[] = [];
-    for (const k of chunk.imageKeys ?? []) {
-      try { images.push({ data: await getFile(k), mediaType: k.endsWith(".png") ? "image/png" : "image/jpeg" }); } catch { /* skip missing image */ }
-    }
-    const pdf = chunk.kind === "pdf" ? await getFile(storageKey) : undefined;
-    out = await aiChunk({ partial, chunk, idx, pdf, images });
+    ({ model, out } = await runAi(partial, chunk, String(idx), storageKey));
   }
-  const model = mergeChunk(partial, out, idx);
   return { model, log: `${chunk.label}: +${out.processes.length} processes, +${out.steps.length} steps, +${out.links.length} links` };
 }
 

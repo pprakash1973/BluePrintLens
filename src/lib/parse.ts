@@ -5,8 +5,8 @@ import type { Chunk, DocSection } from "./schema";
 
 export type Parsed = { sections: DocSection[]; pageCount: number; chunks: Chunk[] };
 
-const PDF_PAGES_PER_CHUNK = 12;
-const TEXT_CHARS_PER_CHUNK = 14000;
+const PDF_PAGES_PER_CHUNK = 8;
+const TEXT_CHARS_PER_CHUNK = 9000;
 
 const decode = (s: string) =>
   s.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
