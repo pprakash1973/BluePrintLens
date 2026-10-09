@@ -5,12 +5,13 @@ import {
   type Node, type Edge, type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Flame, ShieldCheck, Cog, AlertTriangle, GitBranch, Check, MessageSquare } from "lucide-react";
+import { Flame, ShieldCheck, Cog, AlertTriangle, GitBranch, Check, MessageSquare, ChevronsUpDown } from "lucide-react";
 import type { Link, Step } from "@/lib/model";
 import { LOW_CONFIDENCE } from "@/lib/model";
-import { layoutSteps, NODE_H, NODE_W, LANE_LABEL_W, type LaneBy } from "@/lib/layout";
+import { layoutSteps, NODE_H, NODE_W, LANE_LABEL_W, laneOf, type LaneBy } from "@/lib/layout";
 
-export type Overlays = { pain: boolean; controls: boolean; automation: boolean; confidence: boolean };
+export type Overlays = { pain: boolean; controls: boolean; automation: boolean; confidence: boolean; handoffs: boolean };
+export type Focus = { nodes: Set<string>; edges: Set<string> };
 export type StepBadge = { approved: number; changes: number; comments: number };
 
 type StepData = {
@@ -23,17 +24,29 @@ function StepNode({ data }: NodeProps<Node<StepData>>) {
     active ? "ring-4 ring-brand/60" : selected ? "ring-2 ring-brand" : overlays.pain && s.painPoints.length ? "ring-2 ring-pain/70"
     : overlays.controls && s.controls.length ? "ring-2 ring-control/70" : overlays.automation && s.automationTag !== "none" ? "ring-2 ring-auto/70"
     : overlays.confidence && s.confidence < LOW_CONFIDENCE ? "ring-2 ring-warn/80" : "";
+  const isGroup = s.id.startsWith("grp:");
   const accent = s.type === "decision" ? "border-l-warn" : s.type === "event" ? "border-l-control" : s.type === "subprocess" ? "border-l-auto" : "border-l-brand";
   return (
     <div
-      className={`flex flex-col justify-between rounded-lg border border-line border-l-4 bg-white px-2 py-1.5 text-left shadow-sm transition ${accent} ${ring} ${dim ? "opacity-25" : ""} ${diff === "added" ? "bg-green-50" : diff === "changed" ? "bg-amber-50" : ""}`}
+      className={`group relative flex flex-col justify-between rounded-lg border border-line border-l-4 bg-white px-2 py-1.5 text-left shadow-sm transition ${accent} ${ring} ${dim ? "opacity-25" : ""} ${diff === "added" ? "bg-green-50" : diff === "changed" ? "bg-amber-50" : ""}`}
       style={{ width: NODE_W, height: NODE_H }}
       role="button" aria-label={`${s.type}: ${s.name}`}
     >
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !bg-slate-400" />
+      {!isGroup && (
+        <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1 hidden w-60 rounded-lg border border-line bg-white p-2 text-[11px] leading-snug text-ink shadow-lg group-hover:block">
+          <div className="font-semibold">{s.name}</div>
+          {s.description && <div className="mt-0.5 line-clamp-3 text-muted">{s.description}</div>}
+          {s.roles.length > 0 && <div className="mt-1"><b>Who:</b> {s.roles.map((r) => `${r.role} (${r.raci})`).join(", ")}</div>}
+          {s.systems.length > 0 && <div><b>Systems:</b> {s.systems.join(", ")}</div>}
+          {s.painPoints.length > 0 && <div className="text-pain"><b>Pain:</b> {s.painPoints[0]}</div>}
+          <div className="mt-1 text-muted">Click for details</div>
+        </div>
+      )}
       <div className="flex items-start gap-1 text-xs font-semibold leading-tight text-ink">
+        {isGroup && <ChevronsUpDown size={12} className="mt-0.5 shrink-0 text-auto" aria-hidden />}
         {s.type === "decision" && <GitBranch size={12} className="mt-0.5 shrink-0 text-warn" aria-hidden />}
-        <span className="line-clamp-2">{s.name}</span>
+        <span className="line-clamp-2">{s.name}{isGroup ? " — expand" : ""}</span>
       </div>
       <div className="flex items-center gap-1.5 text-[10px] text-muted">
         {s.painPoints.length > 0 && <span title="Pain points" className="flex items-center gap-0.5 text-pain"><Flame size={11} />{s.painPoints.length}</span>}
@@ -73,6 +86,7 @@ function Focus({ id, nodes }: { id?: string | null; nodes: Node[] }) {
 export type FlowProps = {
   steps: Step[]; links: Link[]; by: LaneBy; matches: Set<string> | null; selectedId?: string | null; activeId?: string | null;
   overlays: Overlays; badges?: Record<string, StepBadge>; diff?: Record<string, "added" | "changed">; onSelect: (id: string | null) => void;
+  focus?: Focus | null;
 };
 
 function Inner(p: FlowProps) {
@@ -85,19 +99,31 @@ function Inner(p: FlowProps) {
     const steps: Node[] = layout.nodes.map((n) => ({
       id: n.step.id, type: "step", position: { x: n.x, y: n.y }, draggable: false,
       data: {
-        step: n.step, dim: !!p.matches && !p.matches.has(n.step.id), selected: p.selectedId === n.step.id, active: p.activeId === n.step.id,
+        step: n.step, dim: (!!p.matches && !p.matches.has(n.step.id)) || (!!p.focus && !p.focus.nodes.has(n.step.id)), selected: p.selectedId === n.step.id, active: p.activeId === n.step.id,
         overlays: p.overlays, badge: p.badges?.[n.step.id], diff: p.diff?.[n.step.id],
       } satisfies StepData,
     }));
     return [...lanes, ...steps];
-  }, [layout, p.matches, p.selectedId, p.activeId, p.overlays, p.badges, p.diff]);
+  }, [layout, p.matches, p.focus, p.selectedId, p.activeId, p.overlays, p.badges, p.diff]);
 
-  const edges: Edge[] = useMemo(() => layout.links.map((l) => ({
-    id: l.id, source: l.from, target: l.to, label: l.condition || undefined, type: "smoothstep",
-    style: { stroke: EDGE_COLOR[l.type], strokeWidth: 1.6, strokeDasharray: l.type === "exception" ? "5 4" : undefined },
-    labelStyle: { fontSize: 10, fill: "#334155" }, labelBgStyle: { fill: "#fff" },
-    markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR[l.type] },
-  })), [layout]);
+  const edges: Edge[] = useMemo(() => {
+    const laneById = new Map(layout.nodes.map((n) => [n.step.id, n.lane]));
+    const stepById = new Map(layout.nodes.map((n) => [n.step.id, n.step]));
+    return layout.links.map((l) => {
+      const crossing = laneById.get(l.from) !== laneById.get(l.to) && !!stepById.get(l.from) && !!stepById.get(l.to) && laneOf(stepById.get(l.from)!, p.by) !== laneOf(stepById.get(l.to)!, p.by);
+      const hand = p.overlays.handoffs && (l.type === "handoff" || crossing);
+      const inFocus = !p.focus || p.focus.edges.has(l.id);
+      const color = hand ? "#2f6fed" : EDGE_COLOR[l.type];
+      return {
+        id: l.id, source: l.from, target: l.to, type: "smoothstep",
+        label: hand ? `⇄ ${l.condition || "handoff"}` : l.condition || undefined,
+        style: { stroke: color, strokeWidth: hand ? 3 : p.focus && inFocus ? 2.6 : 1.6, strokeDasharray: l.type === "exception" ? "5 4" : undefined, opacity: inFocus ? 1 : 0.12 },
+        labelStyle: { fontSize: 10, fill: hand ? "#1d4ed8" : "#334155", fontWeight: hand ? 700 : 400 }, labelBgStyle: { fill: "#fff" },
+        markerEnd: { type: MarkerType.ArrowClosed, color },
+        animated: !!p.focus && inFocus,
+      } as Edge;
+    });
+  }, [layout, p.overlays.handoffs, p.focus, p.by]);
 
   return (
     <ReactFlow

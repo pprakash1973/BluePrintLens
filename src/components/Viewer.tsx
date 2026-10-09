@@ -1,12 +1,14 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toPng } from "html-to-image";
-import { Play, Pause, SkipBack, SkipForward, Search, Download, Flame, ShieldCheck, Cog, AlertTriangle, Pencil } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Search, Download, Flame, ShieldCheck, Cog, AlertTriangle, Pencil, ArrowLeftRight, Route, Compass, UserRound, Layers } from "lucide-react";
 import Link from "next/link";
 import { api, useMe, roleRank } from "@/lib/client";
 import { Header } from "@/components/Header";
 import { FlowCanvas, type Overlays, type StepBadge } from "@/components/FlowCanvas";
 import { StepDetail } from "@/components/StepDetail";
+import { PersonaModal, TourCard, SummaryPanel, SignoffPanel, type Persona } from "@/components/Guide";
+import { focusOf, shortestPath, groupSteps } from "@/lib/flowtools";
 import { childrenOf, descendantIds, LOW_CONFIDENCE, processPath, type Process, type ProcessModel, type Step } from "@/lib/model";
 import { layoutSteps, laneOf, type LaneBy } from "@/lib/layout";
 
@@ -43,19 +45,30 @@ export function Viewer({ id }: { id: string }) {
   const [fRole, setFRole] = useState("");
   const [fSystem, setFSystem] = useState("");
   const [q, setQ] = useState("");
-  const [overlays, setOverlays] = useState<Overlays>({ pain: false, controls: false, automation: false, confidence: false });
+  const [overlays, setOverlays] = useState<Overlays>({ pain: false, controls: false, automation: false, confidence: false, handoffs: false });
   const [badges, setBadges] = useState<Record<string, StepBadge>>({});
   const [embed, setEmbed] = useState(false);
   const [diffMap, setDiffMap] = useState<Record<string, "added" | "changed"> | undefined>();
   const [playing, setPlaying] = useState(false);
   const [wIdx, setWIdx] = useState<number | null>(null);
   const flowRef = useRef<HTMLDivElement>(null);
+  const [mine, setMine] = useState<Record<string, string>>({});
+  const [myRole, setMyRole] = useState("");
+  const [showPersona, setShowPersona] = useState(false);
+  const [tour, setTour] = useState(false);
+  const [focusOn, setFocusOn] = useState(true);
+  const [trace, setTrace] = useState<{ from: string; to: string }>({ from: "", to: "" });
+  const [grouped, setGrouped] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [aiNarr, setAiNarr] = useState<Record<string, string>>({});
+  const [walkRole, setWalkRole] = useState("");
+  const [highlight, setHighlight] = useState<Set<string> | null>(null);
 
   const canCollab = !!me?.user && roleRank[me.user.role] >= roleRank.reviewer;
   const isAuthor = me?.user?.role === "author";
 
   const loadBadges = useCallback(() => {
-    api<{ perStep: Record<string, StepBadge> }>(`/api/blueprints/${id}/approvals`).then((r) => setBadges(r.perStep)).catch(() => {});
+    api<{ perStep: Record<string, StepBadge>; mine: Record<string, string> }>(`/api/blueprints/${id}/approvals`).then((r) => { setBadges(r.perStep); setMine(r.mine ?? {}); }).catch(() => {});
   }, [id]);
 
   // initial load + URL state
@@ -89,6 +102,15 @@ export function Viewer({ id }: { id: string }) {
     window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
   }, [tab, scope, selected, versionNo, model]);
 
+  // first visit: persona picker, then tour
+  useEffect(() => {
+    if (!model || embedMode()) return;
+    try {
+      setMyRole(localStorage.getItem("bl_role") ?? "");
+      if (!localStorage.getItem("bl_persona") && !new URLSearchParams(window.location.search).get("s")) setShowPersona(true);
+    } catch {}
+  }, [model]);
+
   const root = model?.processes.find((p) => p.level === "L0") ?? null;
   const scopeId = scope ?? root?.id ?? null;
   const scopeSteps = useMemo(() => {
@@ -96,6 +118,10 @@ export function Viewer({ id }: { id: string }) {
     const ids = descendantIds(model, scopeId);
     return model.steps.filter((s) => ids.has(s.processId));
   }, [model, scopeId]);
+
+  // sub-process grouping: auto-collapse big scopes, expand on click
+  const hasKids = !!model && !!scopeId && childrenOf(model, scopeId).length > 0;
+  useEffect(() => { setGrouped(hasKids && scopeSteps.length > 24); setExpanded(new Set()); }, [scopeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const matches = useMemo(() => {
     if (!model || (!fRole && !fSystem && !q.trim())) return null;
@@ -116,28 +142,45 @@ export function Viewer({ id }: { id: string }) {
     return model.steps.filter((s) => stepText(s).includes(needle)).slice(0, 8);
   }, [model, q]);
 
+  const filtering = !!matches || !!(trace.from && trace.to) || wIdx !== null || !!highlight;
+  const flow = useMemo(() => {
+    if (!model || !scopeId) return { steps: scopeSteps, links: model?.links ?? [], groups: 0 };
+    if (grouped && hasKids && !filtering) return groupSteps(model, scopeId, expanded);
+    return { steps: scopeSteps, links: model.links, groups: 0 };
+  }, [model, scopeId, scopeSteps, grouped, hasKids, filtering, expanded]);
+
   const order = useMemo(() => layoutSteps(scopeSteps, model?.links ?? [], by).order, [scopeSteps, model, by]);
+  const walkOrder = useMemo(() => (walkRole ? order.filter((s) => s.roles.some((r) => r.role === walkRole)) : order), [order, walkRole]);
+
+  const tracePath = useMemo(() => (trace.from && trace.to && model ? shortestPath(trace.from, trace.to, model.links) : null), [trace, model]);
+  const focus = useMemo(() => {
+    if (trace.from && trace.to) return tracePath ?? { nodes: new Set<string>(), edges: new Set<string>() };
+    if (highlight) return { nodes: highlight, edges: new Set<string>() };
+    if (focusOn && selected && flow.steps.some((s) => s.id === selected)) return focusOf(selected, flow.links);
+    return null;
+  }, [trace, tracePath, highlight, focusOn, selected, flow]);
 
   // walkthrough player
   useEffect(() => {
     if (!playing) return;
     const t = setInterval(() => setWIdx((i) => {
       const n = (i ?? -1) + 1;
-      if (n >= order.length) { setPlaying(false); return i; }
+      if (n >= walkOrder.length) { setPlaying(false); return i; }
       return n;
     }), 3800);
     return () => clearInterval(t);
-  }, [playing, order.length]);
+  }, [playing, walkOrder.length]);
   useEffect(() => { setWIdx(null); setPlaying(false); }, [scopeId, by]);
 
-  const activeStep = wIdx !== null ? order[wIdx] : null;
+  const activeStep = wIdx !== null ? walkOrder[wIdx] ?? null : null;
   const narration = useMemo(() => {
     if (!activeStep || !model) return "";
     const outs = model.links.filter((l) => l.from === activeStep.id);
+    if (aiNarr[activeStep.id]) return aiNarr[activeStep.id];
     const who = laneOf(activeStep, "role");
     const next = outs.map((l) => `${l.condition ? `If “${l.condition}”, ` : ""}${l.type === "handoff" ? "hand off to" : "go to"} “${model.steps.find((s) => s.id === l.to)?.name}”`).join("; ");
     return `${who} — ${activeStep.name}. ${activeStep.description}${activeStep.systems.length ? ` Uses ${activeStep.systems.join(", ")}.` : ""}${next ? ` Next: ${next}.` : " This is an end point of the flow."}`;
-  }, [activeStep, model]);
+  }, [activeStep, model, aiNarr]);
 
   if (error) return <div className="p-8"><Header me={me} /><p role="alert" className="text-pain">{error}</p></div>;
   if (!model || !root) return <div className="p-8 text-muted">Loading…</div>;
@@ -145,6 +188,44 @@ export function Viewer({ id }: { id: string }) {
   const sel = selected ? model.steps.find((s) => s.id === selected) ?? null : null;
   const goFlow = (pid: string) => { setScope(pid); setTab("flow"); setSelected(null); };
   const deepLink = typeof window === "undefined" ? "" : `${window.location.origin}/b/${id}?view=flow&p=${sel?.processId ?? ""}&s=${sel?.id ?? ""}`;
+  function pickPersona(pr: Persona, role?: string) {
+    try { localStorage.setItem("bl_persona", pr); if (role) localStorage.setItem("bl_role", role); } catch {}
+    setShowPersona(false);
+    setSelected(null); setFRole(""); setHighlight(null);
+    if (pr === "exec") { setTab("overview"); }
+    if (pr === "owner" && role) { setMyRole(role); setFRole(role); setScope(root!.id); setTab("flow"); }
+    if (pr === "it") { setTab("systems"); }
+    if (pr === "automation") { setScope(root!.id); setTab("flow"); setOverlays((o) => ({ ...o, automation: true, pain: true })); }
+    try { if (!localStorage.getItem("bl_tour_done")) setTour(true); } catch {}
+  }
+  function startWalk() {
+    setWIdx(0); setPlaying(true);
+    if (me?.ai && scopeId && !Object.keys(aiNarr).length) {
+      api<{ items: { id: string; text: string }[] }>(`/api/blueprints/${id}/insights?kind=narration&p=${scopeId}&v=${versionNo || "latest"}`)
+        .then((r) => setAiNarr(Object.fromEntries(r.items.map((i) => [i.id, i.text])))).catch(() => {});
+    }
+  }
+  function selectFlow(sid: string | null) {
+    if (sid?.startsWith("grp:")) { setExpanded((e) => new Set(e).add(sid.slice(4))); return; }
+    setSelected(sid);
+  }
+  const toggleMine = () => {
+    if (!myRole) { setShowPersona(true); return; }
+    setFRole(fRole === myRole ? "" : myRole);
+  };
+  const crossesLane = (l: { from: string; to: string; type: string }) => {
+    const a = model!.steps.find((x) => x.id === l.from), b = model!.steps.find((x) => x.id === l.to);
+    return l.type === "handoff" || (!!a && !!b && laneOf(a, "role") !== laneOf(b, "role"));
+  };
+  const scopeIds = new Set(scopeSteps.map((x) => x.id));
+  const nameOf = (sid: string) => model.steps.find((x) => x.id === sid)?.name ?? sid;
+  const laneName = (sid: string) => { const st = model.steps.find((x) => x.id === sid); return st ? laneOf(st, "role") : ""; };
+  const overlayLists: { key: string; label: string; tone: string; items: { id: string; name: string; note: string }[] }[] = [];
+  if (overlays.pain) overlayLists.push({ key: "pain", label: "Pain points", tone: "text-pain", items: scopeSteps.filter((x) => x.painPoints.length).map((x) => ({ id: x.id, name: x.name, note: x.painPoints[0] })) });
+  if (overlays.controls) overlayLists.push({ key: "controls", label: "Controls", tone: "text-control", items: scopeSteps.filter((x) => x.controls.length).map((x) => ({ id: x.id, name: x.name, note: x.controls[0] })) });
+  if (overlays.automation) overlayLists.push({ key: "automation", label: "Automation candidates", tone: "text-auto", items: scopeSteps.filter((x) => x.automationTag !== "none").map((x) => ({ id: x.id, name: x.name, note: x.automationTag })) });
+  if (overlays.confidence) overlayLists.push({ key: "confidence", label: "Low confidence", tone: "text-warn", items: scopeSteps.filter((x) => x.confidence < LOW_CONFIDENCE).map((x) => ({ id: x.id, name: x.name, note: `${Math.round(x.confidence * 100)}%` })) });
+  if (overlays.handoffs) overlayLists.push({ key: "handoffs", label: "Handoffs between roles", tone: "text-brand", items: model.links.filter((l) => scopeIds.has(l.from) && scopeIds.has(l.to) && crossesLane(l)).map((l) => ({ id: l.to, name: `${nameOf(l.from)} → ${nameOf(l.to)}`, note: `${laneName(l.from)} → ${laneName(l.to)}` })) });
   const published = bundle?.versions.filter((v) => v.status === "published") ?? [];
 
   async function exportPng() {
@@ -170,6 +251,8 @@ export function Viewer({ id }: { id: string }) {
           {TABS.map(([k, label]) => <button key={k} role="tab" aria-selected={tab === k} className="tab" onClick={() => setTab(k)}>{label}</button>)}
         </div>
         <div className="ml-auto flex items-center gap-2 py-1">
+          <button className="btn" onClick={() => setShowPersona(true)} title="Switch to the view that suits your role"><Compass size={14} /> Switch view</button>
+          <button className="btn" onClick={() => setTour(true)}>Tour</button>
           {isAuthor && <Link className="btn" href={`/b/${id}/author`}><Pencil size={14} /> Author</Link>}
           <details className="relative">
             <summary className="btn list-none"><Download size={14} /> Export</summary>
@@ -192,12 +275,29 @@ export function Viewer({ id }: { id: string }) {
           <div className="flex overflow-hidden rounded-lg border border-line" role="group" aria-label="Swimlanes">
             {(["role", "system"] as const).map((b) => <button key={b} aria-pressed={by === b} className={`px-3 py-1.5 ${by === b ? "bg-brand text-white" : "bg-white"}`} onClick={() => setBy(b)}>By {b}</button>)}
           </div>
+          <button className={`btn ${fRole && fRole === myRole ? "!border-brand !bg-blue-50" : ""}`} aria-pressed={!!fRole && fRole === myRole} onClick={toggleMine} title="Show only the steps for my role"><UserRound size={14} /> My steps{myRole ? ` (${myRole})` : ""}</button>
           <select className="input !w-auto" aria-label="Filter by role" value={fRole} onChange={(e) => setFRole(e.target.value)}>
             <option value="">All roles</option>{model.roles.map((r) => <option key={r.id}>{r.name}</option>)}
           </select>
           <select className="input !w-auto" aria-label="Filter by system" value={fSystem} onChange={(e) => setFSystem(e.target.value)}>
             <option value="">All systems</option>{model.systems.map((s) => <option key={s.id}>{s.name}</option>)}
           </select>
+          <details className="relative">
+            <summary className={`btn list-none ${trace.from && trace.to ? "!border-brand !bg-blue-50" : ""}`}><Route size={14} /> Trace path</summary>
+            <div className="absolute left-0 z-30 mt-1 w-80 rounded-lg border border-line bg-panel p-3 shadow-lg">
+              <p className="mb-2 text-xs text-muted">Pick two steps to highlight the route between them, including decision branches.</p>
+              {(["from", "to"] as const).map((k) => (
+                <div key={k} className="mb-2"><label className="label">{k === "from" ? "From" : "To"}</label>
+                  <select className="input" value={trace[k]} onChange={(e) => setTrace({ ...trace, [k]: e.target.value })} aria-label={`Trace ${k}`}>
+                    <option value="">Choose step…</option>{scopeSteps.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                  </select></div>
+              ))}
+              {trace.from && trace.to && <p className={`text-sm ${tracePath ? "text-control" : "text-pain"}`}>{tracePath ? `${tracePath.nodes.size} steps on the shortest path.` : "No route from the first step to the second."}</p>}
+              <button className="btn mt-2" onClick={() => setTrace({ from: "", to: "" })}>Clear</button>
+            </div>
+          </details>
+          <button className={`btn ${focusOn ? "!border-brand !bg-blue-50" : ""}`} aria-pressed={focusOn} onClick={() => setFocusOn(!focusOn)} title="When you select a step, highlight everything before and after it">Focus on select</button>
+          {hasKids && <button className={`btn ${grouped ? "!border-brand !bg-blue-50" : ""}`} aria-pressed={grouped} onClick={() => { setGrouped(!grouped); setExpanded(new Set()); }} title="Collapse sub-processes into single nodes; click one to expand"><Layers size={14} /> Group sub-processes</button>}
           <div className="relative">
             <Search size={14} className="pointer-events-none absolute left-2 top-2.5 text-muted" />
             <input className="input !w-56 !pl-7" placeholder="Search steps, roles, rules…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search" />
@@ -212,17 +312,18 @@ export function Viewer({ id }: { id: string }) {
             )}
           </div>
           <div className="ml-auto flex items-center gap-1" role="group" aria-label="Overlays">
-            {([["pain", Flame, "Pain points"], ["controls", ShieldCheck, "Controls"], ["automation", Cog, "Automation"], ["confidence", AlertTriangle, "Low confidence"]] as const).map(([k, Icon, label]) => (
+            {([["pain", Flame, "Pain points"], ["controls", ShieldCheck, "Controls"], ["automation", Cog, "Automation"], ["confidence", AlertTriangle, "Low confidence"], ["handoffs", ArrowLeftRight, "Handoffs"]] as const).map(([k, Icon, label]) => (
               <button key={k} aria-pressed={overlays[k]} className={`btn ${overlays[k] ? "!border-brand !bg-blue-50" : ""}`} onClick={() => setOverlays({ ...overlays, [k]: !overlays[k] })}><Icon size={14} />{label}</button>
             ))}
             {diffMap && <button className="btn" onClick={() => setDiffMap(undefined)}>Clear change highlights</button>}
+            {highlight && <button className="btn" onClick={() => setHighlight(null)}>Clear answer highlight</button>}
           </div>
         </div>
       )}
 
       <div className="flex min-h-0 flex-1">
         <main className="min-w-0 flex-1 overflow-auto">
-          {tab === "overview" && <Overview model={model} root={root} onOpen={goFlow} />}
+          {tab === "overview" && <Overview model={model} root={root} onOpen={goFlow} id={id} version={versionNo} badges={badges} mine={mine} canCollab={canCollab} myRole={myRole} onStep={(st) => { setScope(st.processId); setSelected(st.id); setTab("flow"); }} />}
           {tab === "flow" && (
             <div className="flex h-full flex-col">
               <nav className="no-print flex flex-wrap items-center gap-1 border-b border-line bg-white px-4 py-1.5 text-xs text-muted" aria-label="Breadcrumb">
@@ -230,7 +331,7 @@ export function Viewer({ id }: { id: string }) {
                   <span key={p.id}>{i > 0 && " › "}<button className="hover:underline" onClick={() => { setScope(p.id); setSelected(null); }}>{p.name}</button>{i === a.length - 1 && <span className="ml-2">{scopeSteps.length} steps</span>}</span>
                 ))}
                 <span className="ml-auto flex items-center gap-1">
-                  <button className="btn !py-1" onClick={() => { setWIdx(0); setPlaying(true); }}><Play size={13} />Walkthrough</button>
+                  <button className="btn !py-1" onClick={startWalk}><Play size={13} />Walkthrough</button>
                 </span>
               </nav>
               {activeStep && (
@@ -238,25 +339,41 @@ export function Viewer({ id }: { id: string }) {
                   <div className="flex gap-1">
                     <button className="btn !p-1.5" aria-label="Previous step" onClick={() => { setPlaying(false); setWIdx(Math.max(0, (wIdx ?? 0) - 1)); }}><SkipBack size={14} /></button>
                     <button className="btn !p-1.5" aria-label={playing ? "Pause" : "Play"} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={14} /> : <Play size={14} />}</button>
-                    <button className="btn !p-1.5" aria-label="Next step" onClick={() => { setPlaying(false); setWIdx(Math.min(order.length - 1, (wIdx ?? 0) + 1)); }}><SkipForward size={14} /></button>
+                    <button className="btn !p-1.5" aria-label="Next step" onClick={() => { setPlaying(false); setWIdx(Math.min(walkOrder.length - 1, (wIdx ?? 0) + 1)); }}><SkipForward size={14} /></button>
                   </div>
-                  <span className="text-xs text-muted">{(wIdx ?? 0) + 1}/{order.length}</span>
+                  <span className="text-xs text-muted">{(wIdx ?? 0) + 1}/{walkOrder.length}</span>
+                  <select className="input !w-auto !py-1 text-xs" aria-label="Follow one role" value={walkRole} onChange={(e) => { setWalkRole(e.target.value); setWIdx(0); }}>
+                    <option value="">All roles</option>{model.roles.map((r) => <option key={r.id}>{r.name}</option>)}
+                  </select>
                   <p className="flex-1">{narration}</p>
                   <button className="btn !py-1" onClick={() => { setWIdx(null); setPlaying(false); }}>Exit</button>
                 </div>
               )}
+              {overlayLists.length > 0 && (
+                <div className="no-print max-h-28 space-y-1 overflow-auto border-b border-line bg-white px-4 py-1.5 text-xs">
+                  {overlayLists.map((o) => (
+                    <div key={o.key} className="flex flex-wrap items-center gap-1">
+                      <b className={o.tone}>{o.label}: {o.items.length}</b>
+                      {o.items.slice(0, 12).map((it, i) => <button key={i} title={it.note} className="chip hover:border-brand" onClick={() => setSelected(it.id)}>{it.name}</button>)}
+                      {o.items.length > 12 && <span className="text-muted">+{o.items.length - 12} more</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div ref={flowRef} className="min-h-0 flex-1 bg-white">
-                <FlowCanvas steps={scopeSteps} links={model.links} by={by} matches={matches} selectedId={selected} activeId={activeStep?.id ?? null}
-                  overlays={overlays} badges={badges} diff={diffMap} onSelect={setSelected} />
+                <FlowCanvas steps={flow.steps} links={flow.links} by={by} matches={matches} selectedId={selected} activeId={activeStep?.id ?? null}
+                  overlays={overlays} badges={badges} diff={diffMap} focus={focus} onSelect={selectFlow} />
               </div>
             </div>
           )}
           {tab === "raci" && <Raci model={model} scopeId={scopeId!} setScope={setScope} onSelect={(sid) => { setSelected(sid); }} />}
           {tab === "systems" && <Systems model={model} onSelect={(sid, pid) => { setScope(pid); setSelected(sid); setTab("flow"); }} />}
           {tab === "heatmap" && <Heatmap model={model} root={root} onOpen={goFlow} />}
-          {tab === "ask" && <Ask id={id} version={versionNo} ai={!!me?.ai} onStep={(sid) => { const s = model.steps.find((x) => x.id === sid); if (s) { setScope(s.processId); setSelected(sid); setTab("flow"); } }} />}
+          {tab === "ask" && <Ask id={id} version={versionNo} ai={!!me?.ai} onShow={(ids) => { setHighlight(new Set(ids)); setScope(root.id); setSelected(null); setTab("flow"); }} onStep={(sid) => { const s = model.steps.find((x) => x.id === sid); if (s) { setScope(s.processId); setSelected(sid); setTab("flow"); } }} />}
           {tab === "changes" && <Changes id={id} versions={published} current={versionNo} onHighlight={(m) => { setDiffMap(m); setTab("flow"); setScope(root.id); }} />}
         </main>
+        {showPersona && <PersonaModal roles={model.roles.map((r) => r.name)} onPick={pickPersona} onClose={() => { setShowPersona(false); try { localStorage.setItem("bl_persona", "skip"); } catch {} }} />}
+        {tour && <TourCard onDone={() => { setTour(false); try { localStorage.setItem("bl_tour_done", "1"); } catch {} }} onStep={(i) => setTab((["overview", "flow", "flow", "flow", "ask"] as Tab[])[i])} />}
         {sel && (
           <div className="no-print w-[26rem] shrink-0">
             <StepDetail step={sel} model={model} blueprintId={id} user={me?.user ?? null} canCollab={canCollab} deepLink={deepLink}
@@ -268,6 +385,8 @@ export function Viewer({ id }: { id: string }) {
   );
 }
 
+const embedMode = () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("embed") === "1";
+
 const stepText = (s: Step) =>
   [s.name, s.description, ...s.roles.map((r) => r.role), ...s.systems, ...s.rules, ...s.inputs, ...s.outputs, ...s.controls, ...s.painPoints].join(" ").toLowerCase();
 
@@ -275,7 +394,10 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
   return <div className="card px-4 py-3"><div className={`text-2xl font-semibold ${tone ?? ""}`}>{value}</div><div className="text-xs text-muted">{label}</div></div>;
 }
 
-function Overview({ model, root, onOpen }: { model: ProcessModel; root: Process; onOpen: (id: string) => void }) {
+function Overview({ model, root, onOpen, id, version, badges, mine, canCollab, myRole, onStep }: {
+  model: ProcessModel; root: Process; onOpen: (id: string) => void; id: string; version: number | "draft"; badges: Record<string, StepBadge>;
+  mine: Record<string, string>; canCollab: boolean; myRole: string; onStep: (s: Step) => void;
+}) {
   const all = stats(model, new Set(model.processes.map((p) => p.id)));
   const l1 = childrenOf(model, root.id);
   return (
@@ -285,6 +407,8 @@ function Overview({ model, root, onOpen }: { model: ProcessModel; root: Process;
         <button className="btn !py-1" onClick={() => onOpen(root.id)}>View end-to-end flow</button>
       </div>
       <p className="mb-4 max-w-3xl text-sm text-muted">{root.objective || root.scope || "End-to-end process landscape. Click a process area to drill down."}</p>
+      <SummaryPanel id={id} version={version} />
+      <SignoffPanel model={model} badges={badges} mine={mine} canCollab={canCollab} myRole={myRole} onOpen={onStep} />
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Stat label="Steps" value={all.steps} /><Stat label="Pain points" value={all.pain} tone="text-pain" /><Stat label="Controls" value={all.controls} tone="text-control" />
         <Stat label="Automation candidates" value={all.auto} tone="text-auto" /><Stat label="Need review (low confidence)" value={all.low} tone="text-warn" />
@@ -414,12 +538,13 @@ function Heatmap({ model, root, onOpen }: { model: ProcessModel; root: Process; 
   );
 }
 
-function Ask({ id, version, ai, onStep }: { id: string; version: number | "draft"; ai: boolean; onStep: (id: string) => void }) {
+function Ask({ id, version, ai, onStep, onShow }: { id: string; version: number | "draft"; ai: boolean; onStep: (id: string) => void; onShow: (ids: string[]) => void }) {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<{ q: string; a: string; steps: { id: string; name: string }[] }[]>([]);
   const [err, setErr] = useState("");
-  const examples = ["Who approves credit exceptions?", "Which steps use SAP?", "Where are the biggest pain points?"];
+  const [examples, setExamples] = useState<string[]>(["Who is responsible for each step?", "Which systems are used most?", "Where are the biggest pain points?"]);
+  useEffect(() => { api<{ questions: string[] }>(`/api/blueprints/${id}/insights?v=${version || "latest"}`).then((r) => { if (r.questions?.length) setExamples(r.questions.slice(0, 5)); }).catch(() => {}); }, [id, version]);
   async function ask(question: string) {
     if (!question.trim()) return;
     setBusy(true); setErr("");
@@ -444,7 +569,7 @@ function Ask({ id, version, ai, onStep }: { id: string; version: number | "draft
           <div key={i} className="card p-4">
             <p className="mb-2 text-sm font-semibold">{m.q}</p>
             <p className="whitespace-pre-wrap text-sm">{m.a}</p>
-            {m.steps.length > 0 && <div className="mt-2 flex flex-wrap gap-1">{m.steps.map((s) => <button key={s.id} className="chip text-brand" onClick={() => onStep(s.id)}>{s.name}</button>)}</div>}
+            {m.steps.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-1"><button className="btn !py-0.5 text-xs" onClick={() => onShow(m.steps.map((s) => s.id))}>Show on diagram</button>{m.steps.map((s) => <button key={s.id} className="chip text-brand" onClick={() => onStep(s.id)}>{s.name}</button>)}</div>}
           </div>
         ))}
       </div>

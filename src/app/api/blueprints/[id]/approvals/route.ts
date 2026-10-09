@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { asc, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { comments, approvals } from "@/lib/schema";
+import { currentUser } from "@/lib/auth";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -11,8 +12,13 @@ export async function GET(_: NextRequest, { params }: Ctx) {
   const db = await getDb();
   const a = await db.select().from(approvals).where(eq(approvals.blueprintId, id)).orderBy(asc(approvals.createdAt));
   const c = await db.select({ stepId: comments.stepId }).from(comments).where(eq(comments.blueprintId, id));
+  const me = await currentUser();
   const latest: Record<string, { status: string; by: string; at: string }> = {};
-  for (const x of a) latest[`${x.stepId}:${x.userId}`] = { status: x.status, by: x.userName, at: x.createdAt.toISOString() };
+  const mine: Record<string, string> = {};
+  for (const x of a) {
+    latest[`${x.stepId}:${x.userId}`] = { status: x.status, by: x.userName, at: x.createdAt.toISOString() };
+    if (me && x.userId === me.id) mine[x.stepId] = x.status;
+  }
   const perStep: Record<string, { approved: number; changes: number; comments: number }> = {};
   for (const [k, v] of Object.entries(latest)) {
     const sid = k.split(":")[0];
@@ -20,5 +26,5 @@ export async function GET(_: NextRequest, { params }: Ctx) {
     if (v.status === "approved") perStep[sid].approved++; else perStep[sid].changes++;
   }
   for (const x of c) { perStep[x.stepId] ??= { approved: 0, changes: 0, comments: 0 }; perStep[x.stepId].comments++; }
-  return NextResponse.json({ perStep, trail: a.map((x) => ({ stepId: x.stepId, by: x.userName, status: x.status, note: x.note, at: x.createdAt })) });
+  return NextResponse.json({ perStep, mine, trail: a.map((x) => ({ stepId: x.stepId, by: x.userName, status: x.status, note: x.note, at: x.createdAt })) });
 }

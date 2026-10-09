@@ -45,3 +45,5 @@ body { background: var(--bg); color: var(--ink); font-family: system-ui, -apple-
 
 .react-flow__node { cursor: pointer; }
 @media print { header, .no-print { display: none !important; } }
+
+.react-flow__node:hover { z-index: 1000 !important; }

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { X, Link2, Check, AlertTriangle } from "lucide-react";
+import { X, Link2, Check, AlertTriangle, Mail } from "lucide-react";
 import { api } from "@/lib/client";
 import { LOW_CONFIDENCE, processPath, type ProcessModel, type Step } from "@/lib/model";
 import type { SessionUser } from "@/lib/auth";
@@ -66,6 +66,11 @@ export function StepDetail(p: {
             onClick={() => { navigator.clipboard?.writeText(p.deepLink); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
             {copied ? <Check size={14} /> : <Link2 size={14} />}
           </button>
+          <a className="btn !px-2" title="Email this step for review" aria-label="Email this step for review"
+            href={`mailto:?subject=${encodeURIComponent(`Please review: ${s.name}`)}&body=${encodeURIComponent(`Could you review and approve this step?
+
+${s.name}
+${p.deepLink}`)}`}><Mail size={14} /></a>
           <button className="btn !px-2" onClick={p.onClose} aria-label="Close details"><X size={14} /></button>
         </div>
       </div>
